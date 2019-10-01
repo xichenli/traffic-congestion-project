@@ -94,9 +94,15 @@ test["average_rainfall"] = test['city_month'].map(monthly_rainfall)
 train.drop('city_month', axis=1, inplace=True)
 test.drop('city_month', axis=1, inplace=True)
 
+#---------------- Label encoder for City----------------------#
 #HotEncoding of cities
-train = pd.concat([train,pd.get_dummies(train["City"],dummy_na=False, drop_first=False)],axis=1).drop(["City"],axis=1)
-test = pd.concat([test,pd.get_dummies(test["City"],dummy_na=False, drop_first=False)],axis=1).drop(["City"],axis=1)
+#train = pd.concat([train,pd.get_dummies(train["City"],dummy_na=False, drop_first=False)],axis=1).drop(["City"],axis=1)
+#test = pd.concat([test,pd.get_dummies(test["City"],dummy_na=False, drop_first=False)],axis=1).drop(["City"],axis=1)
+
+encoder = LabelEncoder()
+encoder.fit(pd.concat([train["City"],test["City"]]).drop_duplicates().values)
+train["City"] = encoder.transform(train["City"])
+test["City"] = encoder.transform(test["City"])
 
 #------------- Transform response to a two stage model--------------#
 for perc in ['20','50','80']:
@@ -104,14 +110,44 @@ for perc in ['20','50','80']:
     train['Time_p'+perc+'_log'] = np.log(train['TotalTimeStopped_p'+perc]+1)
     train['Dist_p'+perc+'_IsZero'] = (train['DistanceToFirstStop_p'+perc]==0).astype(int)
     train['Dist_p'+perc+'_log'] = np.log(train['DistanceToFirstStop_p'+perc]+1)
+    print(perc,np.sum(train['Time_p'+perc+'_IsZero']),np.sum(train['Dist_p'+perc+'_IsZero']))
 print(train.columns)
 #====================================================================#
-cat_feat = ['IntersectionId','Hour', 'Weekend','Month', 'same_street_exact', 'Intersection',
-       'Atlanta', 'Boston', 'Chicago', 'Philadelphia', 'EntryType', 'ExitType']
+cat_feat = ['Intersection','Hour', 'Weekend','Month', 'same_street_exact',
+       'City', 'EntryType', 'ExitType']
 
-param_cols = ['Intersection','Hour','Weekend','Month','same_street_exact',
-            'Atlanta', 'Boston', 'Chicago', 'Philadelphia', 
-            'EntryType', 'ExitType','EntryHeading','ExitHeading',
+param_cols = ['Intersection','Hour','Weekend','Month','same_street_exact','City', 
+            'EntryType', 'ExitType','EntryHeading','ExitHeading','diffHeading',
            'average_temp','average_rainfall']
 target_zero_cols = ['Time_p20_IsZero','Time_p50_IsZero','Time_p80_IsZero','Dist_p20_IsZero','Dist_p50_IsZero','Dist_p80_IsZero']
+target_log_cols = ['Time_p20_log','Time_p50_log','Time_p80_log','Dist_p20_log','Dist_p50_log','Dist_p80_log']
+#----------------- Model1 lightGBM ---------------------------------#
 
+#Step 1 classify zero and non-zero
+X_train,X_test,y_train,y_test=train_test_split(train[param_cols],train['Time_p80_IsZero'], test_size=0.2, random_state=42)
+dtrain = lgb.Dataset(data=X_train, label=y_train,categorical_feature=cat_feat)
+dvalid = lgb.Dataset(data=X_test, label=y_test,categorical_feature=cat_feat,reference=dtrain)
+params = {'num_leaves': 200,
+         'objective': 'binary',
+         'metric':'cross_entropy',
+         'boosting_type': 'gbdt',
+         'learning_rate': 0.05,
+         'feature_fraction': 0.9,
+         'bagging_fraction': 0.8,
+         'bagging_freq': 5,
+         'verbose': 0}
+gbm = lgb.train(params,
+                dtrain,
+                num_boost_round=200,
+                valid_sets=dvalid,
+                early_stopping_rounds=5)
+y_pred = gbm.predict(X_test, num_iteration=gbm.best_iteration)
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import roc_auc_score
+auc = roc_auc_score(y_test,y_pred)
+print("auc:",auc)
+for threshold in range(9):
+    y_pred_class = y_pred > threshold/10.0
+    cm = confusion_matrix(y_test, y_pred_class)
+    tn, fp, fn, tp = cm.ravel()
+    print('The mistake of prediction is:', tn,fp,fn,tp,float(fp)/(fp+tn))
