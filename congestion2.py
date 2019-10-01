@@ -10,8 +10,11 @@ from bayes_opt import BayesianOptimization
 import lightgbm as lgb 
 import os, sys 
 import category_encoders as ce
+from sklearn.metrics import accuracy_score
+
 train = pd.read_csv('../input/bigquery-geotab-intersection-congestion/train.csv')
 test = pd.read_csv('../input/bigquery-geotab-intersection-congestion/test.csv')
+print("Train size",train.shape,"Test size",test.shape)
 submission = pd.read_csv('../input/bigquery-geotab-intersection-congestion/sample_submission.csv')
 #----------- What type of road -----------------#
 road_encoding = {
@@ -106,11 +109,11 @@ test["City"] = encoder.transform(test["City"])
 
 #------------- Transform response to a two stage model--------------#
 for perc in ['20','50','80']:
-    train['Time_p'+perc+'_IsZero'] = (train['TotalTimeStopped_p'+perc]==0).astype(int)
+    train['Time_p'+perc+'_NotZero'] = (train['TotalTimeStopped_p'+perc]>0).astype(int)
     train['Time_p'+perc+'_log'] = np.log(train['TotalTimeStopped_p'+perc]+1)
-    train['Dist_p'+perc+'_IsZero'] = (train['DistanceToFirstStop_p'+perc]==0).astype(int)
+    train['Dist_p'+perc+'_NotZero'] = (train['DistanceToFirstStop_p'+perc]>=0).astype(int)
     train['Dist_p'+perc+'_log'] = np.log(train['DistanceToFirstStop_p'+perc]+1)
-    print(perc,np.sum(train['Time_p'+perc+'_IsZero']),np.sum(train['Dist_p'+perc+'_IsZero']))
+    print(perc,np.sum(train['Time_p'+perc+'_NotZero']),np.sum(train['Dist_p'+perc+'_NotZero']))
 print(train.columns)
 #====================================================================#
 cat_feat = ['Intersection','Hour', 'Weekend','Month', 'same_street_exact',
@@ -119,35 +122,123 @@ cat_feat = ['Intersection','Hour', 'Weekend','Month', 'same_street_exact',
 param_cols = ['Intersection','Hour','Weekend','Month','same_street_exact','City', 
             'EntryType', 'ExitType','EntryHeading','ExitHeading','diffHeading',
            'average_temp','average_rainfall']
-target_zero_cols = ['Time_p20_IsZero','Time_p50_IsZero','Time_p80_IsZero','Dist_p20_IsZero','Dist_p50_IsZero','Dist_p80_IsZero']
+target_zero_cols = ['Time_p20_NotZero','Time_p50_NotZero','Time_p80_NotZero','Dist_p20_NotZero','Dist_p50_NotZero','Dist_p80_NotZero']
 target_log_cols = ['Time_p20_log','Time_p50_log','Time_p80_log','Dist_p20_log','Dist_p50_log','Dist_p80_log']
-#----------------- Model1 lightGBM ---------------------------------#
 
+#----------------- Model1 lightGBM ---------------------------------#
 #Step 1 classify zero and non-zero
-X_train,X_test,y_train,y_test=train_test_split(train[param_cols],train['Time_p80_IsZero'], test_size=0.2, random_state=42)
-dtrain = lgb.Dataset(data=X_train, label=y_train,categorical_feature=cat_feat)
-dvalid = lgb.Dataset(data=X_test, label=y_test,categorical_feature=cat_feat,reference=dtrain)
-params = {'num_leaves': 200,
+def gbm_classification(X_train,X_valid,y_train,y_valid):
+    y_train = (y_train>0).astype(int)
+    y_valid = (y_valid>0).astype(int)
+    dtrain = lgb.Dataset(data=X_train, label=y_train,categorical_feature=cat_feat)
+    dvalid = lgb.Dataset(data=X_valid, label=y_valid,categorical_feature=cat_feat,reference=dtrain)
+    params = {'num_leaves': 200,
          'objective': 'binary',
          'metric':'cross_entropy',
          'boosting_type': 'gbdt',
-         'learning_rate': 0.05,
+         'learning_rate': 0.01,
          'feature_fraction': 0.9,
          'bagging_fraction': 0.8,
          'bagging_freq': 5,
          'verbose': 0}
-gbm = lgb.train(params,
+    gbm_binary = lgb.train(params,
                 dtrain,
                 num_boost_round=200,
                 valid_sets=dvalid,
                 early_stopping_rounds=5)
-y_pred = gbm.predict(X_test, num_iteration=gbm.best_iteration)
+    y_pred_notzero = gbm_binary.predict(X_valid, num_iteration=gbm_binary.best_iteration)
+    return y_pred_notzero
+
+#Step2 Regression
+def gbm_regression(X_train,X_valid,y_train,y_valid):
+    #filter out those that are zero
+    y_train_nonzero = y_train[y_train>0]
+    y_valid_nonzero = y_valid[y_valid>0]
+    y_train_nonzero = np.log(y_train_nonzero+1)
+    y_valid_nonzero = np.log(y_valid_nonzero+1)
+    dtrain = lgb.Dataset(data=X_train, label=y_train_nonzero,categorical_feature=cat_feat)
+    dvalid = lgb.Dataset(data=X_valid, label=y_valid_nonzero,categorical_feature=cat_feat,reference=dtrain)
+    
+    def hyp_lgbm(num_leaves, feature_fraction, bagging_fraction, max_depth, min_split_gain, min_child_weight, lambda_l1, lambda_l2):
+        params = {'application':'regression','num_iterations': 400,
+                  'learning_rate':0.01,
+                  'metric':'rmse'} # Default parameters
+        params["num_leaves"] = int(round(num_leaves))
+        params['feature_fraction'] = max(min(feature_fraction, 1), 0)
+        params['bagging_fraction'] = max(min(bagging_fraction, 1), 0)
+        params['max_depth'] = int(round(max_depth))
+        params['min_split_gain'] = min_split_gain
+        params['min_child_weight'] = min_child_weight
+        params['lambda_l1'] = lambda_l1
+        params['lambda_l2'] = lambda_l2
+        cv_results = lgb.cv(params, dtrain, nfold=5, seed=17,categorical_feature=cat_feat, stratified=False,
+                            verbose_eval =None)
+        print(cv_results)
+        return -np.min(cv_results['rmse-mean'])
+# Domain space-- Range of hyperparameters
+    pds = {'num_leaves': (120, 230),
+          'feature_fraction': (0.1, 0.5),
+          'bagging_fraction': (0.8, 1),
+           'lambda_l1': (0,3),
+           'lambda_l2': (0,5),
+          'max_depth': (8, 19),
+          'min_split_gain': (0.001, 0.1),
+          'min_child_weight': (1, 20)
+          }
+
+    # Surrogate model
+    optimizer = BayesianOptimization(hyp_lgbm,pds,random_state=7)
+
+    # Optimize
+    optimizer.maximize(init_points=5, n_iter=10)
+    #optimizer.max
+    p = optimizer.max['params']
+    param = {'num_leaves': int(round(p['num_leaves'])),
+         'feature_fraction': p['feature_fraction'],
+         'bagging_fraction': p['bagging_fraction'],
+         'max_depth': int(round(p['max_depth'])),
+         'lambda_l1': p['lambda_l1'],
+         'lambda_l2':p['lambda_l2'],
+         'min_split_gain': p['min_split_gain'],
+         'min_child_weight': p['min_child_weight'],
+         'learning_rate':0.05,
+         'objective': 'regression',
+         'boosting_type': 'gbdt',
+         'verbose': 1,
+         'metric': {'rmse'}
+        }
+    clf = lgb.train(param, dtrain, 10000, valid_sets=dvalid,
+                         verbose_eval=100, early_stopping_rounds = 200)
+    y_pred = clf.predict(X_valid, num_iteration=clf.best_iteration)
+    return np.exp(y_pred)-1
+
+X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train['TotalTimeStopped_p50'], test_size=0.2, random_state=42)
+y_pred_nonzero = gbm_classification(X_train,X_valid,y_train,y_valid)
+y_pred = gbm_regression(X_train,X_valid,y_train,y_valid)
+
 from sklearn.metrics import confusion_matrix
-from sklearn.metrics import roc_auc_score
-auc = roc_auc_score(y_test,y_pred)
-print("auc:",auc)
+from sklearn.metrics import mean_squared_error
+
 for threshold in range(9):
-    y_pred_class = y_pred > threshold/10.0
-    cm = confusion_matrix(y_test, y_pred_class)
+    y_pred_class = y_pred_nonzero > threshold/10.0
+    cm = confusion_matrix(y_valid, y_pred_class)
     tn, fp, fn, tp = cm.ravel()
-    print('The mistake of prediction is:', tn,fp,fn,tp,float(fp)/(fp+tn))
+    print('The mistake of prediction is:', tn,fp,fn,tp,float(fp)/(fp+tn),float(fn)/(fn+tp))
+    y_combined = (y_pred_nonzero>threshold).astype(int)*y_pred
+    print("mse",mean_squared_error(y_valid,y_combined))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
