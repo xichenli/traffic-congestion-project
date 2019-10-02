@@ -212,33 +212,22 @@ def gbm_regression(X_train,X_valid,y_train,y_valid):
     y_pred = clf.predict(X_valid, num_iteration=clf.best_iteration)
     return np.exp(y_pred)-1
 
-X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train['TotalTimeStopped_p50'], test_size=0.2, random_state=42)
-y_pred_nonzero = gbm_classification(X_train,X_valid,y_train,y_valid)
-y_pred = gbm_regression(X_train,X_valid,y_train,y_valid)
-
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import mean_squared_error
-
-for threshold in range(9):
-    y_pred_class = y_pred_nonzero > threshold/10.0
-    cm = confusion_matrix(y_valid, y_pred_class)
-    tn, fp, fn, tp = cm.ravel()
-    print('The mistake of prediction is:', tn,fp,fn,tp,float(fp)/(fp+tn),float(fn)/(fn+tp))
-    y_combined = (y_pred_nonzero>threshold).astype(int)*y_pred
-    print("mse",mean_squared_error(y_valid,y_combined))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+outfile = open("error.dat",'w')
+for target in target_cols:
+    X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train[target], test_size=0.2, random_state=42)
+    y_pred_nonzero = gbm_classification(X_train,X_valid,y_train,y_valid)
+    y_pred = gbm_regression(X_train,X_valid,y_train,y_valid)
+    
+    #Check results
+    y_valid = y_valid.to_numpy()
+    true_nonzero = (y_valid>0).astype(int)
+    for ith in range(9):
+        threshold = ith/10.0
+        pred_nonzero = (y_pred_nonzero>threshold).astype(int)
+        combined = pred_nonzero*y_pred
+        tn, fp, fn, tp = confusion_matrix(true_nonzero,pred_nonzero).ravel()
+        mse = mean_squared_error(combined,y_valid)
+        outfile.write(target+"\t"+str(threshold)+"\t"+str(tn)+"\t"+str(fp)+"\t"+str(fn)+"\t"+str(tp)+"\t"+str(mse)+"\n")
+outfile.close()
