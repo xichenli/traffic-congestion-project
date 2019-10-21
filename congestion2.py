@@ -11,31 +11,27 @@ import lightgbm as lgb
 import os, sys 
 import category_encoders as ce
 from sklearn.metrics import accuracy_score
-
+import math
 train = pd.read_csv('../input/bigquery-geotab-intersection-congestion/train.csv')
 test = pd.read_csv('../input/bigquery-geotab-intersection-congestion/test.csv')
 print("Train size",train.shape,"Test size",test.shape)
 submission = pd.read_csv('../input/bigquery-geotab-intersection-congestion/sample_submission.csv')
+target_cols = ['TotalTimeStopped_p20','TotalTimeStopped_p50','TotalTimeStopped_p80','DistanceToFirstStop_p20','DistanceToFirstStop_p50','DistanceToFirstStop_p80']
 #----------- What type of road -----------------#
-road_encoding = {
-    'Road': 1,
-    'Street': 2,
-    'Avenue': 2,
-    'Drive': 3,
-    'Broad': 3,
-    'Boulevard': 4
-}
+road_encoding = {'Street': 0, 'St': 0, 'Avenue': 1, 'Ave': 1, 'Boulevard': 2, 'Blvd': 2,'Road': 3,'Rd':3,
+                'Drive': 4, 'Dr':4,'Lane': 5, 'Tunnel': 6, 'Highway': 7,'Hwy':7,'Express':8,'Expy':8}
+
 def encode(x):
     if pd.isna(x):
-        return 0
+        return -1
     for road in road_encoding.keys():
         if road in x:
             return road_encoding[road]
-    return 0
-train['EntryType'] = train['EntryStreetName'].apply(encode)
-train['ExitType'] = train['ExitStreetName'].apply(encode)
-test['EntryType'] = test['EntryStreetName'].apply(encode)
-test['ExitType'] = test['ExitStreetName'].apply(encode)
+    return -1
+
+for par in [train, test]:
+    par['EntryType'] = par['EntryStreetName'].apply(encode)
+    par['ExitType'] = par['ExitStreetName'].apply(encode)
 #-------------------Direction encodeing -----------------------#
 directions = {
     'N': 0,
@@ -94,9 +90,34 @@ monthly_rainfall = {'Atlanta1': 5.02, 'Atlanta5': 3.95, 'Atlanta6': 3.63, 'Atlan
 # Creating a new column by mapping the city_month variable to it's corresponding average monthly rainfall
 train["average_rainfall"] = train['city_month'].map(monthly_rainfall)
 test["average_rainfall"] = test['city_month'].map(monthly_rainfall)
+
+monthly_snowfall = {'Atlanta1': 0.6, 'Atlanta5': 0, 'Atlanta6': 0, 'Atlanta7': 0, 'Atlanta8': 0, 'Atlanta9': 0, 
+                    'Atlanta10': 0, 'Atlanta11': 0, 'Atlanta12': 0.2, 'Boston1': 12.9, 'Boston5': 0, 'Boston6': 0, 
+                    'Boston7': 0, 'Boston8': 0, 'Boston9': 0, 'Boston10': 0,'Boston11': 1.3, 'Boston12': 9.0, 
+                    'Chicago1': 11.5, 'Chicago5': 0, 'Chicago6': 0, 'Chicago7': 0, 'Chicago8': 0, 'Chicago9': 0, 
+                    'Chicago10': 0,  'Chicago11': 1.3, 'Chicago12': 8.7, 'Philadelphia1': 6.5, 'Philadelphia5': 0, 
+                    'Philadelphia6': 0, 'Philadelphia7': 0, 'Philadelphia8': 0, 'Philadelphia9':0 , 'Philadelphia10': 0, 
+                    'Philadelphia11': 0.3, 'Philadelphia12': 3.4}
+# Creating a new column by mapping the city_month variable to it's corresponding average monthly snowfall
+train["average_snowfall"] = train['city_month'].map(monthly_rainfall)
+test["average_snowfall"] = test['city_month'].map(monthly_rainfall)
 train.drop('city_month', axis=1, inplace=True)
 test.drop('city_month', axis=1, inplace=True)
 
+#--------------- Distance to City Center---------------------#
+# distance from the center of the city
+def add_distance(df):
+    
+    df_center = pd.DataFrame({"Atlanta":[33.753746, -84.386330],
+                             "Boston":[42.361145, -71.057083],
+                             "Chicago":[41.881832, -87.623177],
+                             "Philadelphia":[39.952583, -75.165222]})
+    
+    df["CenterDistance"] = df.apply(lambda row: math.sqrt((df_center[row.City][0] - row.Latitude) ** 2 +
+                                                          (df_center[row.City][1] - row.Longitude) ** 2) , axis=1)
+
+add_distance(train)
+add_distance(test)
 #---------------- Label encoder for City----------------------#
 #HotEncoding of cities
 #train = pd.concat([train,pd.get_dummies(train["City"],dummy_na=False, drop_first=False)],axis=1).drop(["City"],axis=1)
@@ -106,26 +127,49 @@ encoder = LabelEncoder()
 encoder.fit(pd.concat([train["City"],test["City"]]).drop_duplicates().values)
 train["City"] = encoder.transform(train["City"])
 test["City"] = encoder.transform(test["City"])
+#------------------Target encoder for Weekend and Hour------------------------------#
+# This function encode time information (time and weekend) according to a specific target
+def Time_encoder(train_df,test_df,target_str):
+    train_df['Time'] = train_df['Hour'].astype(str)+"_"+train_df['Weekend'].astype(str)
+    test_df['Time'] = test_df['Hour'].astype(str)+"_"+test_df['Weekend'].astype(str)
+    encoder = ce.TargetEncoder()
+    encoder.fit(train_df['Time'],train[target_str])
+    train_df['Time'] = encoder.transform(train_df['Time'])
+    test_df['Time'] = encoder.transform(test_df['Time'])
+    return train_df,test_df
+#-----------------------------------------------------------------------------------#
+cat_feat = ['Intersection','Month','City', 'EntryType', 'ExitType','Weekend','Hour']
+#'Hour', 'Weekend','same_street_exact',
+param_cols = ['Intersection','Month','City', 'EntryType', 'ExitType','Weekend','Hour',
+              'EntryHeading','ExitHeading','diffHeading','average_temp','average_rainfall','average_snowfall','CenterDistance']
+print(train[param_cols].head(3))
+print(test[param_cols].head(3))
 
-#------------- Transform response to a two stage model--------------#
-for perc in ['20','50','80']:
-    train['Time_p'+perc+'_NotZero'] = (train['TotalTimeStopped_p'+perc]>0).astype(int)
-    train['Time_p'+perc+'_log'] = np.log(train['TotalTimeStopped_p'+perc]+1)
-    train['Dist_p'+perc+'_NotZero'] = (train['DistanceToFirstStop_p'+perc]>=0).astype(int)
-    train['Dist_p'+perc+'_log'] = np.log(train['DistanceToFirstStop_p'+perc]+1)
-    print(perc,np.sum(train['Time_p'+perc+'_NotZero']),np.sum(train['Dist_p'+perc+'_NotZero']))
-print(train.columns)
-#====================================================================#
-cat_feat = ['Intersection','Hour', 'Weekend','Month', 'same_street_exact',
-       'City', 'EntryType', 'ExitType']
-
-param_cols = ['Intersection','Hour','Weekend','Month','same_street_exact','City', 
-            'EntryType', 'ExitType','EntryHeading','ExitHeading','diffHeading',
-           'average_temp','average_rainfall']
-target_zero_cols = ['Time_p20_NotZero','Time_p50_NotZero','Time_p80_NotZero','Dist_p20_NotZero','Dist_p50_NotZero','Dist_p80_NotZero']
-target_log_cols = ['Time_p20_log','Time_p50_log','Time_p80_log','Dist_p20_log','Dist_p50_log','Dist_p80_log']
-
-#----------------- Model1 lightGBM ---------------------------------#
+#----------------- Model1 CatBoost ---------------------------------#
+from catboost import CatBoostRegressor
+from catboost import CatBoostClassifier,Pool
+def cat_classification(X_train,X_valid,y_train,y_valid):
+    y_train = (y_train>0).astype(int)
+    y_valid = (y_valid>0).astype(int)
+    number_of_zero = y_train.sum()
+    number_of_one = y_train.shape[0]-number_of_zero
+    eval_data = Pool(data=X_valid,label=y_valid,cat_features=cat_feat)
+    model = CatBoostClassifier(iterations=3,loss_function='Logloss',custom_metric=['Logloss','AUC:hints=skip_train~false'])
+    model.fit(X_train,y_train,cat_features=cat_feat,eval_set=eval_data)
+    y_pred_notzero = model.predict(X_valid)
+    return y_pred_notzero
+def cat_regression(X_train,X_valid,y_train,y_valid):
+    y_train_nonzero = y_train[y_train>0]
+    y_valid_nonzero = y_valid[y_valid>0]
+    y_train_nonzero = np.log(y_train_nonzero+1)
+    y_valid_nonzero = np.log(y_valid_nonzero+1)
+    dtrain = Pool(data=X_train[y_train>0], label=y_train_nonzero,cat_features=cat_feat)
+    dvalid = Pool(data=X_valid[y_valid>0], label=y_valid_nonzero,cat_features=cat_feat)
+    model = CatBoostRegressor(iterations=3,loss_function='RMSE',custom_metric=['RMSE'])
+    model.fit(X_train[y_train>0],y_train_nonzero,cat_features=cat_feat,eval_set=dvalid)
+    y_pred = model.predict(X_valid)
+    return np.exp(y_pred)-1
+#----------------- Model2 lightGBM ---------------------------------#
 #Step 1 classify zero and non-zero
 def gbm_classification(X_train,X_valid,y_train,y_valid):
     y_train = (y_train>0).astype(int)
@@ -143,7 +187,7 @@ def gbm_classification(X_train,X_valid,y_train,y_valid):
          'verbose': 0}
     gbm_binary = lgb.train(params,
                 dtrain,
-                num_boost_round=200,
+                num_boost_round=300,
                 valid_sets=dvalid,
                 early_stopping_rounds=5)
     y_pred_notzero = gbm_binary.predict(X_valid, num_iteration=gbm_binary.best_iteration)
@@ -156,8 +200,8 @@ def gbm_regression(X_train,X_valid,y_train,y_valid):
     y_valid_nonzero = y_valid[y_valid>0]
     y_train_nonzero = np.log(y_train_nonzero+1)
     y_valid_nonzero = np.log(y_valid_nonzero+1)
-    dtrain = lgb.Dataset(data=X_train, label=y_train_nonzero,categorical_feature=cat_feat)
-    dvalid = lgb.Dataset(data=X_valid, label=y_valid_nonzero,categorical_feature=cat_feat,reference=dtrain)
+    dtrain = lgb.Dataset(data=X_train[y_train>0], label=y_train_nonzero,categorical_feature=cat_feat,free_raw_data=False)
+    dvalid = lgb.Dataset(data=X_valid[y_valid>0], label=y_valid_nonzero,categorical_feature=cat_feat,reference=dtrain,free_raw_data=False)
     
     def hyp_lgbm(num_leaves, feature_fraction, bagging_fraction, max_depth, min_split_gain, min_child_weight, lambda_l1, lambda_l2):
         params = {'application':'regression','num_iterations': 400,
@@ -173,7 +217,7 @@ def gbm_regression(X_train,X_valid,y_train,y_valid):
         params['lambda_l2'] = lambda_l2
         cv_results = lgb.cv(params, dtrain, nfold=5, seed=17,categorical_feature=cat_feat, stratified=False,
                             verbose_eval =None)
-        print(cv_results)
+#        print(cv_results)
         return -np.min(cv_results['rmse-mean'])
 # Domain space-- Range of hyperparameters
     pds = {'num_leaves': (120, 230),
@@ -204,30 +248,44 @@ def gbm_regression(X_train,X_valid,y_train,y_valid):
          'learning_rate':0.05,
          'objective': 'regression',
          'boosting_type': 'gbdt',
-         'verbose': 1,
+         'verbose': 0,
          'metric': {'rmse'}
         }
     clf = lgb.train(param, dtrain, 10000, valid_sets=dvalid,
                          verbose_eval=100, early_stopping_rounds = 200)
     y_pred = clf.predict(X_valid, num_iteration=clf.best_iteration)
     return np.exp(y_pred)-1
-
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import mean_squared_error
-outfile = open("error.dat",'w')
+#outfile = open("error.dat",'w')
+
 for target in target_cols:
+#   train,test = Time_encoder(train,test,target)
+
     X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train[target], test_size=0.2, random_state=42)
     y_pred_nonzero = gbm_classification(X_train,X_valid,y_train,y_valid)
     y_pred = gbm_regression(X_train,X_valid,y_train,y_valid)
-    
-    #Check results
-    y_valid = y_valid.to_numpy()
-    true_nonzero = (y_valid>0).astype(int)
-    for ith in range(9):
-        threshold = ith/10.0
-        pred_nonzero = (y_pred_nonzero>threshold).astype(int)
-        combined = pred_nonzero*y_pred
-        tn, fp, fn, tp = confusion_matrix(true_nonzero,pred_nonzero).ravel()
-        mse = mean_squared_error(combined,y_valid)
-        outfile.write(target+"\t"+str(threshold)+"\t"+str(tn)+"\t"+str(fp)+"\t"+str(fn)+"\t"+str(tp)+"\t"+str(mse)+"\n")
-outfile.close()
+#    np.savetxt("validation.dat",np.c_[,y_valid.to_numpy()[:,np.newaxis]])
+    y_pred_nonzero1 = cat_classification(X_train,X_valid,y_train,y_valid)
+    y_pred1 = cat_regression(X_train,X_valid,y_train,y_valid)
+    np.savetxt(target+".dat",np.c_[y_pred_nonzero[:,np.newaxis],y_pred[:,np.newaxis],y_pred_nonzero1[:,np.newaxis],y_pred1[:,np.newaxis],y_valid.to_numpy()[:,np.newaxis]])
+#    true_nonzero = (y_valid>0).astype(int)
+#    for ith in range(9):
+#        threshold = ith/10.0
+#        pred_nonzero = (y_pred_nonzero>threshold).astype(int)
+#        combined = pred_nonzero*y_pred
+#        tn, fp, fn, tp = confusion_matrix(true_nonzero,pred_nonzero).ravel()
+#       mse = mean_squared_error(combined,y_valid)
+#        outfile.write(target+"\t"+str(threshold)+"\t"+str(tn)+"\t"+str(fp)+"\t"+str(fn)+"\t"+str(tp)+"\t"+str(mse)+"\n")
+#outfile.close()
+
+
+
+
+
+
+
+
+
+
+
