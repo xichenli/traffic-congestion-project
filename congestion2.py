@@ -148,34 +148,44 @@ print(test[param_cols].head(3))
 #----------------- Model1 CatBoost ---------------------------------#
 from catboost import CatBoostRegressor
 from catboost import CatBoostClassifier,Pool
-def cat_classification(X_train,X_valid,y_train,y_valid):
+def cat_classification(X_train,X_valid,y_train,y_valid=None):
     y_train = (y_train>0).astype(int)
-    y_valid = (y_valid>0).astype(int)
-    number_of_zero = y_train.sum()
-    number_of_one = y_train.shape[0]-number_of_zero
-    eval_data = Pool(data=X_valid,label=y_valid,cat_features=cat_feat)
-    model = CatBoostClassifier(iterations=3,loss_function='Logloss',custom_metric=['Logloss','AUC:hints=skip_train~false'])
+    number_of_positive = y_train.sum()
+    number_of_negative = y_train.shape[0]-number_of_positive
+    if y_valid is not None:
+        y_valid = (y_valid>0).astype(int)
+        eval_data = Pool(data=X_valid,label=y_valid,cat_features=cat_feat)
+    else:
+        eval_data = None
+        
+    model = CatBoostClassifier(iterations=300,loss_function='Logloss',custom_metric=['Logloss','AUC:hints=skip_train~false'],class_weights=[1,float(number_of_negative)/number_of_positive])
     model.fit(X_train,y_train,cat_features=cat_feat,eval_set=eval_data)
     y_pred_notzero = model.predict(X_valid)
     return y_pred_notzero
-def cat_regression(X_train,X_valid,y_train,y_valid):
+    
+def cat_regression(X_train,X_valid,y_train,y_valid=None):
     y_train_nonzero = y_train[y_train>0]
-    y_valid_nonzero = y_valid[y_valid>0]
     y_train_nonzero = np.log(y_train_nonzero+1)
-    y_valid_nonzero = np.log(y_valid_nonzero+1)
     dtrain = Pool(data=X_train[y_train>0], label=y_train_nonzero,cat_features=cat_feat)
-    dvalid = Pool(data=X_valid[y_valid>0], label=y_valid_nonzero,cat_features=cat_feat)
-    model = CatBoostRegressor(iterations=3,loss_function='RMSE',custom_metric=['RMSE'])
+
+    if y_valid is not None:
+        y_valid_nonzero = y_valid[y_valid>0]
+        y_valid_nonzero = np.log(y_valid_nonzero+1)
+        dvalid = Pool(data=X_valid[y_valid>0], label=y_valid_nonzero,cat_features=cat_feat)
+    else:
+        dvalid = None
+        
+    model = CatBoostRegressor(iterations=300,loss_function='RMSE',custom_metric=['RMSE'])
     model.fit(X_train[y_train>0],y_train_nonzero,cat_features=cat_feat,eval_set=dvalid)
     y_pred = model.predict(X_valid)
     return np.exp(y_pred)-1
 #----------------- Model2 lightGBM ---------------------------------#
 #Step 1 classify zero and non-zero
-def gbm_classification(X_train,X_valid,y_train,y_valid):
+def gbm_classification(X_train,X_valid,y_train,y_valid=None):
     y_train = (y_train>0).astype(int)
-    y_valid = (y_valid>0).astype(int)
+    number_of_positive = y_train.sum()
+    number_of_negative = y_train.shape[0]-number_of_positive
     dtrain = lgb.Dataset(data=X_train, label=y_train,categorical_feature=cat_feat)
-    dvalid = lgb.Dataset(data=X_valid, label=y_valid,categorical_feature=cat_feat,reference=dtrain)
     params = {'num_leaves': 200,
          'objective': 'binary',
          'metric':'cross_entropy',
@@ -184,7 +194,15 @@ def gbm_classification(X_train,X_valid,y_train,y_valid):
          'feature_fraction': 0.9,
          'bagging_fraction': 0.8,
          'bagging_freq': 5,
-         'verbose': 0}
+         'verbose': 0,
+         'scale_pos_weight':float(number_of_negative)/number_of_positive
+             }
+    if y_valid is not None:
+        y_valid = (y_valid>0).astype(int)
+        dvalid = lgb.Dataset(data=X_valid, label=y_valid,categorical_feature=cat_feat,reference=dtrain)
+    else:
+        dvalid = None
+        
     gbm_binary = lgb.train(params,
                 dtrain,
                 num_boost_round=300,
@@ -197,12 +215,16 @@ def gbm_classification(X_train,X_valid,y_train,y_valid):
 def gbm_regression(X_train,X_valid,y_train,y_valid):
     #filter out those that are zero
     y_train_nonzero = y_train[y_train>0]
-    y_valid_nonzero = y_valid[y_valid>0]
     y_train_nonzero = np.log(y_train_nonzero+1)
-    y_valid_nonzero = np.log(y_valid_nonzero+1)
     dtrain = lgb.Dataset(data=X_train[y_train>0], label=y_train_nonzero,categorical_feature=cat_feat,free_raw_data=False)
-    dvalid = lgb.Dataset(data=X_valid[y_valid>0], label=y_valid_nonzero,categorical_feature=cat_feat,reference=dtrain,free_raw_data=False)
     
+    if y_valid is not None:
+        y_valid_nonzero = y_valid[y_valid>0]
+        y_valid_nonzero = np.log(y_valid_nonzero+1)
+        dvalid = lgb.Dataset(data=X_valid[y_valid>0], label=y_valid_nonzero,categorical_feature=cat_feat,reference=dtrain,free_raw_data=False)
+    else:
+        dvalid = None
+        
     def hyp_lgbm(num_leaves, feature_fraction, bagging_fraction, max_depth, min_split_gain, min_child_weight, lambda_l1, lambda_l2):
         params = {'application':'regression','num_iterations': 400,
                   'learning_rate':0.01,
@@ -252,23 +274,38 @@ def gbm_regression(X_train,X_valid,y_train,y_valid):
          'metric': {'rmse'}
         }
     clf = lgb.train(param, dtrain, 10000, valid_sets=dvalid,
-                         verbose_eval=100, early_stopping_rounds = 200)
+                         verbose_eval=100, early_stopping_rounds = 300)
     y_pred = clf.predict(X_valid, num_iteration=clf.best_iteration)
     return np.exp(y_pred)-1
+
 from sklearn.metrics import confusion_matrix
 from sklearn.metrics import mean_squared_error
 #outfile = open("error.dat",'w')
 
-for target in target_cols:
+get_test_results = True
+tot_result = []
+for it,target in enumerate(target_cols):
 #   train,test = Time_encoder(train,test,target)
-
-    X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train[target], test_size=0.2, random_state=42)
-    y_pred_nonzero = gbm_classification(X_train,X_valid,y_train,y_valid)
-    y_pred = gbm_regression(X_train,X_valid,y_train,y_valid)
+    if not get_test_results:
+        X_train,X_valid,y_train,y_valid=train_test_split(train[param_cols],train[target], test_size=0.2, random_state=42)
+    else:
+        X_train = train[param_cols]
+        y_train = train[target]
+        X_valid = test[param_cols]
+        y_valid = None
+        
+    nonzero_bgm = gbm_classification(X_train,X_valid,y_train,y_valid)
+    predict_bgm = gbm_regression(X_train,X_valid,y_train,y_valid)
 #    np.savetxt("validation.dat",np.c_[,y_valid.to_numpy()[:,np.newaxis]])
-    y_pred_nonzero1 = cat_classification(X_train,X_valid,y_train,y_valid)
-    y_pred1 = cat_regression(X_train,X_valid,y_train,y_valid)
-    np.savetxt(target+".dat",np.c_[y_pred_nonzero[:,np.newaxis],y_pred[:,np.newaxis],y_pred_nonzero1[:,np.newaxis],y_pred1[:,np.newaxis],y_valid.to_numpy()[:,np.newaxis]])
+    nonezero_cat = cat_classification(X_train,X_valid,y_train,y_valid)
+    predict_cat = cat_regression(X_train,X_valid,y_train,y_valid)
+    if not get_test_results:
+        np.savetxt(target+".dat",np.c_[nonezero_bgm[:,np.newaxis],predict_bgm[:,np.newaxis],nonezero_cat[:,np.newaxis],predict_cat[:,np.newaxis],y_valid.to_numpy()[:,np.newaxis]])
+    else:
+        threshold = 0.3
+        if target[-2:]=="50": threshold = 0.6
+        result = 0.7*(nonzero_bgm>threshold).astype(int)*predict_bgm+0.3*predict_cat*nonzero_cat
+        submission[]
 #    true_nonzero = (y_valid>0).astype(int)
 #    for ith in range(9):
 #        threshold = ith/10.0
