@@ -38,11 +38,13 @@ directions = {
 train['EntryHeading'] = train['EntryHeading'].map(directions)
 train['ExitHeading'] = train['ExitHeading'].map(directions)
 train['diffHeading'] = train['EntryHeading']-train['ExitHeading']
+train['diffHeading'] = train['diffHeading'] +(train['diffHeading']>math.pi)*(-2*math.pi)+(train['diffHeading']<-math.pi)*(2*math.pi)
 train["same_street_exact"] = (train["EntryStreetName"] ==  train["ExitStreetName"]).astype(int)
 
 test['EntryHeading'] = test['EntryHeading'].map(directions)
 test['ExitHeading'] = test['ExitHeading'].map(directions)
 test['diffHeading'] = test['EntryHeading']-test['ExitHeading']
+test['diffHeading'] = test['diffHeading'] +(test['diffHeading']>math.pi)*(-2*math.pi)+(test['diffHeading']<-math.pi)*(2*math.pi)
 test["same_street_exact"] = (test["EntryStreetName"] ==  test["ExitStreetName"]).astype(int)
 
 #------------- Add number of Exit direction, number of Entry direction --------------#
@@ -60,7 +62,6 @@ train = train.merge(df_nentry,on=['UniqueID','ExitHeading'],how='left',copy=Fals
 
 test = test.merge(df_nexit,on=['UniqueID','EntryHeading'],how='left',copy=False,suffixes=('', '_y'))
 test = test.merge(df_nentry,on=['UniqueID','ExitHeading'],how='left',copy=False,suffixes=('', '_y'))
-print("number of exit done")
 
 df_all = df_all.drop_duplicates(['UniqueID','ExitHeading'])
 df_center = pd.DataFrame({"Atlanta":[33.753746, -84.386330],
@@ -79,9 +80,10 @@ print(train.head(48).to_string())
 train.drop(list(train.filter(regex='_y$')), axis=1, inplace=True)
 test.drop(list(test.filter(regex='_y$')), axis=1, inplace=True)
 del [df_all,df_nexit,df_nentry]
-"""
-#----------- What type of road -----------------#
 
+
+
+#----------- What type of road -----------------#
 road_encoding = {'Street': 1, 'St': 1, 'Avenue': 1, 'Ave': 1, 'Boulevard': 2, 'Blvd': 2,'Road': 3,'Rd':3,
                 'Drive': 4, 'Dr':4,'Lane': 5, 'Tunnel': 8, 'Highway': 7,'Hwy':7,'Express':8,'Expy':8}
 def encode(x):
@@ -96,10 +98,10 @@ test['EntryType'] = test['EntryStreetName'].apply(encode)
 train['ExitType'] = train['ExitStreetName'].apply(encode)
 test['ExitType'] = test['ExitStreetName'].apply(encode)
 
+
 #--------- Weather factor---------------------#
 #Add temperature (°F) of each city by month
 #Reference: https://www.kaggle.com/brokenfulcrum/geotab-baseline
-
 monthly_temp = {'Atlanta1': 43, 'Atlanta5': 69, 'Atlanta6': 76, 'Atlanta7': 79, 'Atlanta8': 78, 'Atlanta9': 73,
               'Atlanta10': 62, 'Atlanta11': 53, 'Atlanta12': 45, 'Boston1': 30, 'Boston5': 59, 'Boston6': 68,
               'Boston7': 74, 'Boston8': 73, 'Boston9': 66, 'Boston10': 55,'Boston11': 45, 'Boston12': 35,
@@ -114,7 +116,6 @@ monthly_rainfall = {'Atlanta1': 5.02, 'Atlanta5': 3.95, 'Atlanta6': 3.63, 'Atlan
               'Chicago10': 2.71,  'Chicago11': 3.01, 'Chicago12': 2.43, 'Philadelphia1': 3.52, 'Philadelphia5': 3.88,
               'Philadelphia6': 3.29, 'Philadelphia7': 4.39, 'Philadelphia8': 3.82, 'Philadelphia9':3.88 , 'Philadelphia10': 2.75,
               'Philadelphia11': 3.16, 'Philadelphia12': 3.31}
-
 monthly_snowfall = {'Atlanta1': 0.6, 'Atlanta5': 0, 'Atlanta6': 0, 'Atlanta7': 0, 'Atlanta8': 0, 'Atlanta9': 0, 
                     'Atlanta10': 0, 'Atlanta11': 0, 'Atlanta12': 0.2, 'Boston1': 12.9, 'Boston5': 0, 'Boston6': 0, 
                     'Boston7': 0, 'Boston8': 0, 'Boston9': 0, 'Boston10': 0,'Boston11': 1.3, 'Boston12': 9.0, 
@@ -128,89 +129,63 @@ train["Temp"] = train['city_month'].map(monthly_temp)
 train["Rainfall"] = train['city_month'].map(monthly_rainfall)
 train["Snowfall"] = train['city_month'].map(monthly_snowfall)
 train.drop('city_month', axis=1, inplace=True)
-
 test['city_month'] = test["City"] + test["Month"].astype(str)
 test["Temp"] = test['city_month'].map(monthly_temp)
 test["Rainfall"] = test['city_month'].map(monthly_rainfall)
 test["Snowfall"] = test['city_month'].map(monthly_snowfall)
 test.drop('city_month', axis=1, inplace=True)
-print("weather info done")
 
 
-print(time.time()-start)
 # ------------ Business of the Neighbor Area -------------------------#
 subtrain = train.drop_duplicates(['UniqueID'])
 lat = subtrain['Latitude'].to_numpy()
 lon = subtrain['Longitude'].to_numpy()
 uid = subtrain['UniqueID'].to_numpy()
 sigma = 1e-5
-distance2 = np.exp(-1.0/sigma*(np.power((lat[:,np.newaxis]-lat[np.newaxis,:]),2)+np.power((lon[:,np.newaxis]-lon[np.newaxis,:]),2)))
-df_dist = pd.DataFrame(data=distance2)
+weights = np.exp(-1.0/sigma*(np.power((lat[:,np.newaxis]-lat[np.newaxis,:]),2)+np.power((lon[:,np.newaxis]-lon[np.newaxis,:]),2)))
+normalization = np.sum(weights,axis=1).reshape((-1,1))
+df_dist = pd.DataFrame(data=weights)
 df_dist['UniqueID']=uid
 ncol_dist = int(df_dist.shape[1]) 
-print("ncol_dist",ncol_dist)
 train_midday = train[train['Hour'].isin([10,11,12,13,14]) & train['Weekend']==0]
 self_mean = train_midday.groupby(['UniqueID'])[target_cols].mean().reset_index()
-
 df_dist = df_dist.merge(self_mean,on='UniqueID',how='left',copy=False,suffixes=('', '_y'))
-print("after merging, df_dist shape",df_dist.shape)
-print(df_dist.iloc[:5,-8:])
 df_dist = df_dist.to_numpy()
-results = np.dot(df_dist[:,:(ncol_dist-1)],df_dist[:,ncol_dist:])
+results = np.dot(df_dist[:,:(ncol_dist-1)],df_dist[:,ncol_dist:])/normalization
 neighbor_df = pd.DataFrame(results,columns=['NB_T20','NB_T50','NB_T80','NB_D20','NB_D50','NB_D80'])
 neighbor_df['UniqueID'] = uid
-
 train = train.merge(neighbor_df, on='UniqueID',how='left',copy=False,suffixes=('', '_y'))
 test = test.merge(neighbor_df, on='UniqueID',how='left',copy=False,suffixes=('', '_y'))
 del [train_midday,self_mean,df_dist,subtrain]
-print("neighborhood done") 
 
-print(time.time()-start)
 #-------------- Encoder for Categorical Cols: City,Month----------------- #
          # OneHot Encoder, for XgBoost
 enc = OneHotEncoder(handle_unknown='ignore')
-enc.fit(train[['City','Month']])
-
+enc.fit(train[['City','Month','EntryType','ExitType']])
 train = pd.concat([train,
-                   pd.DataFrame(enc.transform(train[['City','Month']]).toarray(),
+                   pd.DataFrame(enc.transform(train[['City','Month','EntryType','ExitType']]).toarray(),
                                index=train.index,
                                columns=enc.get_feature_names().tolist())],axis=1)
-
 test = pd.concat([test,
-                   pd.DataFrame(enc.transform(test[['City','Month']]).toarray(),
+                   pd.DataFrame(enc.transform(test[['City','Month','EntryType','ExitType']]).toarray(),
                                index=test.index,
                                columns=enc.get_feature_names().tolist())],axis=1)
 
-print("city month encoder done")
-print(time.time()-start)
+
 #-------------- Encoder for Categorical Cols: Hour ----------------- #
   # First add a baseline for hour
 train['MorningPeak'] = (train['Hour']>=7) & (train['Hour']<=9)
 train['AfternoonPeak'] = (train['Hour']>=15) & (train['Hour']<=17)
 train['IsDay'] = (train['Hour']>=6) & (train['Hour']<=20)
-
 test['MorningPeak'] = (test['Hour']>=7) & (test['Hour']<=9)
 test['AfternoonPeak'] = (test['Hour']>=15) & (test['Hour']<=17)
 test['IsDay'] = (test['Hour']>=6) & (test['Hour']<=20)
-
 tmp = train.groupby(['Weekend','Hour','City'])[target_cols].mean().reset_index()
 tmp.columns = ['Weekend','Hour','City','HourAve_T20','HourAve_T50','HourAve_T80','HourAve_D20','HourAve_D50','HourAve_D80']
-print(tmp.head(10))
 test = test.merge(tmp, on=['Weekend','City','Hour'],how='left',copy=False,suffixes=('', '_y'))
 train = train.merge(tmp, on=['Weekend','City','Hour'],how='left',copy=False,suffixes=('', '_y'))
-print("hour encoder done")
-
-print(time.time()-start)
 train.drop(list(train.filter(regex='_y$')), axis=1, inplace=True)
 test.drop(list(test.filter(regex='_y$')), axis=1, inplace=True)
-
-#-------------- Encoder for Categorical Cols: EntryType/ExitType ----------------- #
-
-
-
-
-
-
 
 
 
@@ -232,15 +207,5 @@ def get_percentage_of_known_data(train,test):
   #plt.scatter(train_count[:,1].tolist(),train_count[:,2].tolist(),s=train_count[:,3].tolist(),color='b',alpha=0.5)
   plt.plot(range(train_count.shape[0]),train_count[:,3].tolist())
   plt.show()
-
-
-print(train.head().to_string())
-print(test.head().to_string())
-
-
-
-
-
-
-
-"""
+print(train.tail(48).to_string())
+print(test.tail(48).to_string())
