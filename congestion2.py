@@ -17,6 +17,33 @@ test = pd.read_csv('../input/bigquery-geotab-intersection-congestion/test.csv')
 print("Train size",train.shape,"Test size",test.shape)
 submission = pd.read_csv('../input/bigquery-geotab-intersection-congestion/sample_submission.csv')
 target_cols = ['TotalTimeStopped_p20','TotalTimeStopped_p50','TotalTimeStopped_p80','DistanceToFirstStop_p20','DistanceToFirstStop_p50','DistanceToFirstStop_p80']
+
+#----------- Find its neighbor ----------------#
+  
+def generate_neighbor(train):
+  train["uniqueID"] = train["IntersectionId"].astype(str) + train["City"]
+  test["uniqueID"] = test["IntersectionId"].astype(str) + test["City"]
+  #Step1 create a dataframe that contains distance^2 between two uniqueID
+  subtrain = train.drop_duplicates(['uniqueID'])
+  lat = subtrain['Latitude'].to_numpy()
+  lon = subtrain['Longitude'].to_numpy()
+  uid = subtrain['uniqueID'].to_numpy()
+  sigma = 1e-5
+  distance2 = np.power((lat[:,np.newaxis]-lat[np.newaxis,:]),2)+np.power((lon[:,np.newaxis]-lon[np.newaxis,:]),2)
+  distance2_bool = distance2<1.3e-5
+  df_dist = pd.DataFrame(data=distance2,index=uid,columns=uid)
+  df_dist_bool = pd.DataFrame(data=distance2_bool,index=uid,columns=uid)
+
+  for one_id in uid:
+    id_list = df_dist_bool[df_dist_bool[one_id]==1].index.to_list()
+    neighborhood = train[train['uniqueID'] in id_list]
+    print(neighborhood.shape)
+
+generate_neighbor(train)
+     
+"""
+    
+
 #----------- What type of road -----------------#
 road_encoding = {'Street': 0, 'St': 0, 'Avenue': 1, 'Ave': 1, 'Boulevard': 2, 'Blvd': 2,'Road': 3,'Rd':3,
                 'Drive': 4, 'Dr':4,'Lane': 5, 'Tunnel': 6, 'Highway': 7,'Hwy':7,'Express':8,'Expy':8}
@@ -99,8 +126,8 @@ monthly_snowfall = {'Atlanta1': 0.6, 'Atlanta5': 0, 'Atlanta6': 0, 'Atlanta7': 0
                     'Philadelphia6': 0, 'Philadelphia7': 0, 'Philadelphia8': 0, 'Philadelphia9':0 , 'Philadelphia10': 0, 
                     'Philadelphia11': 0.3, 'Philadelphia12': 3.4}
 # Creating a new column by mapping the city_month variable to it's corresponding average monthly snowfall
-train["average_snowfall"] = train['city_month'].map(monthly_rainfall)
-test["average_snowfall"] = test['city_month'].map(monthly_rainfall)
+train["average_snowfall"] = train['city_month'].map(monthly_snowfall)
+test["average_snowfall"] = test['city_month'].map(monthly_snowfall)
 train.drop('city_month', axis=1, inplace=True)
 test.drop('city_month', axis=1, inplace=True)
 
@@ -319,7 +346,7 @@ for it,target in enumerate(target_cols):
 
 
 
-
+"""
 
 
 
