@@ -19,7 +19,7 @@ target_cols = ['TotalTimeStopped_p20','TotalTimeStopped_p50','TotalTimeStopped_p
 print("data shape:",train.shape,test.shape)
 train = train[(train['TotalTimeStopped_p50']<139.7702496) & (train['DistanceToFirstStop_p50']<151.9573668)]
 print("new train shape:",train.shape)
-train.drop(['RowId','IntersectionId','TotalTimeStopped_p40','TotalTimeStopped_p60','TimeFromFirstStop_p20','TimeFromFirstStop_p40','TimeFromFirstStop_p50','TimeFromFirstStop_p60','TimeFromFirstStop_p80','DistanceToFirstStop_p40','DistanceToFirstStop_p60'],axis=1,inplace=True)
+train.drop(['RowId','Path','IntersectionId','TotalTimeStopped_p40','TotalTimeStopped_p60','TimeFromFirstStop_p20','TimeFromFirstStop_p40','TimeFromFirstStop_p50','TimeFromFirstStop_p60','TimeFromFirstStop_p80','DistanceToFirstStop_p40','DistanceToFirstStop_p60'],axis=1,inplace=True)
 gc.collect()
 
 
@@ -75,7 +75,6 @@ df_all["ExitToCenterAngle"] = df_all.apply(lambda row: math.cos(row.ExitHeading)
                                           +math.sin(row.ExitHeading)*(df_center[row.City][1] - row.Longitude)/row.CityCenterDistance,axis=1)
 train = train.merge(df_all,on=['UniqueID','ExitHeading'],how='left',copy=False,suffixes=('', '_y'))
 test = test.merge(df_all,on=['UniqueID','ExitHeading'],how='left',copy=False,suffixes=('', '_y'))
-print(train.head(48).to_string())
 
 train.drop(list(train.filter(regex='_y$')), axis=1, inplace=True)
 test.drop(list(test.filter(regex='_y$')), axis=1, inplace=True)
@@ -174,12 +173,12 @@ test = pd.concat([test,
 
 #-------------- Encoder for Categorical Cols: Hour ----------------- #
   # First add a baseline for hour
-train['MorningPeak'] = (train['Hour']>=7) & (train['Hour']<=9)
-train['AfternoonPeak'] = (train['Hour']>=15) & (train['Hour']<=17)
-train['IsDay'] = (train['Hour']>=6) & (train['Hour']<=20)
-test['MorningPeak'] = (test['Hour']>=7) & (test['Hour']<=9)
-test['AfternoonPeak'] = (test['Hour']>=15) & (test['Hour']<=17)
-test['IsDay'] = (test['Hour']>=6) & (test['Hour']<=20)
+train['MorningPeak'] = ((train['Hour']>=7) & (train['Hour']<=9)).astype(int)
+train['AfternoonPeak'] = ((train['Hour']>=15) & (train['Hour']<=17)).astype(int)
+train['IsDay'] = ((train['Hour']>=6) & (train['Hour']<=20)).astype(int)
+test['MorningPeak'] = ((test['Hour']>=7) & (test['Hour']<=9)).astype(int)
+test['AfternoonPeak'] = ((test['Hour']>=15) & (test['Hour']<=17)).astype(int)
+test['IsDay'] = ((test['Hour']>=6) & (test['Hour']<=20)).astype(int)
 tmp = train.groupby(['Weekend','Hour','City'])[target_cols].mean().reset_index()
 tmp.columns = ['Weekend','Hour','City','HourAve_T20','HourAve_T50','HourAve_T80','HourAve_D20','HourAve_D50','HourAve_D80']
 test = test.merge(tmp, on=['Weekend','City','Hour'],how='left',copy=False,suffixes=('', '_y'))
@@ -207,5 +206,3 @@ def get_percentage_of_known_data(train,test):
   #plt.scatter(train_count[:,1].tolist(),train_count[:,2].tolist(),s=train_count[:,3].tolist(),color='b',alpha=0.5)
   plt.plot(range(train_count.shape[0]),train_count[:,3].tolist())
   plt.show()
-print(train.tail(48).to_string())
-print(test.tail(48).to_string())
